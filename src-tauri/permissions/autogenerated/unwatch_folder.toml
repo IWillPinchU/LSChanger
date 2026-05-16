@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-unwatch-folder"
+description = "Enables the unwatch_folder command without any pre-configured scope."
+commands.allow = ["unwatch_folder"]
+
+[[permission]]
+identifier = "deny-unwatch-folder"
+description = "Denies the unwatch_folder command without any pre-configured scope."
+commands.deny = ["unwatch_folder"]

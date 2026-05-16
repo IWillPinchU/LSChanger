@@ -291,6 +291,68 @@ input:focus-visible {
   text-transform: uppercase;
 }
 
+.folder-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.folder-section-actions {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.sidebar-icon-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.sidebar-icon-btn:hover {
+  background: var(--surface);
+  border-color: #34343d;
+  color: var(--text-main);
+}
+
+.folder-search-panel {
+  display: none;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.folder-search-panel.active {
+  display: grid;
+}
+
+#folder-search-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  background-color: #101015;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+}
+
+#folder-search-input:focus {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(255, 71, 126, 0.09);
+}
+
 .pill-group {
   display: flex;
   flex-wrap: wrap;
@@ -913,70 +975,88 @@ input:focus-visible {
 }
 
 .modal-header {
-  padding: 17px 20px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 14px 16px 10px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
 }
 
-.modal-header h2 {
-  font-size: 15px;
-  font-weight: 750;
-}
-
-.icon-btn-rounded {
-  width: 32px;
-  height: 32px;
+.settings-add-folder-btn {
+  min-height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: 1px solid transparent;
+  gap: 7px;
+  padding: 0 12px;
+  background: #111116;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: background-color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.settings-add-folder-btn:hover {
+  background: var(--surface);
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(255, 71, 126, 0.08);
+}
+
+.settings-close-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #1b1b21;
+  border: 1px solid #34343d;
   border-radius: var(--radius-sm);
   color: var(--text-dim);
   cursor: pointer;
-  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 
-.icon-btn-rounded:hover {
-  background: var(--surface);
-  border-color: #34343d;
+.settings-close-btn:hover {
+  background: var(--surface-elevated);
+  border-color: #464651;
   color: var(--text-main);
+  transform: translateY(-1px);
 }
 
 .modal-body {
-  padding: 20px;
+  padding: 0 16px 16px;
 }
 
-.setting-group label {
-  display: block;
-  font-size: 10px;
-  font-weight: 800;
-  color: var(--text-darker);
-  text-transform: uppercase;
-  margin-bottom: 9px;
-  letter-spacing: 0;
-}
-
-.setting-row {
+.settings-source-list {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  background: #101015;
-  padding: 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  flex-direction: column;
+  gap: 7px;
 }
 
-.path-display {
-  flex: 1;
+.settings-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 7px 6px 10px;
+  background: #101015;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.settings-source-path {
   min-width: 0;
-  font-size: 12px;
   color: var(--text-dim);
-  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Draggable Region */

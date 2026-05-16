@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -26,9 +27,11 @@ const PAGE_SIZE = 24;
 const DEFAULT_SIDEBAR_WIDTH = 240;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 360;
+const ROOT_FOLDERS_KEY = "root_folders";
+const LEGACY_FOLDER_KEY = "last_folder";
 
 let allImages: ImageData[] = [];
-let rootFolder: string | null = null;
+let rootFolders: string[] = [];
 let currentFolder: string | null = null;
 let userSid: string | null = null;
 let currentFilter: 'all' | 'landscape' | 'portrait' = 'all';
@@ -38,17 +41,27 @@ let showAllImages = false;
 let visibleImagesCache: ImageData[] = [];
 let editingImagePath: string | null = null;
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let folderRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let folderSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let isRefreshingFromWatcher = false;
+let folderSearchQuery = "";
 const expandedFolderPaths = new Set<string>();
 const folderChildren = new Map<string, FolderData[]>();
 const loadingFolderPaths = new Set<string>();
 const folderLoadErrors = new Set<string>();
 
+interface FolderChangedPayload {
+  root_path: string;
+}
+
 const imageGrid = document.getElementById("image-grid");
 const currentFolderPathEl = document.getElementById("current-folder-path");
 const currentFolderNameEl = document.getElementById("current-folder-name");
-const settingsFolderPathEl = document.getElementById("settings-folder-path");
+const settingsSourceListEl = document.getElementById("settings-source-list");
 const imageCountEl = document.getElementById("image-count");
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
+const folderSearchPanel = document.getElementById("folder-search-panel");
+const folderSearchInput = document.getElementById("folder-search-input") as HTMLInputElement;
 const settingsOverlay = document.getElementById("settings-overlay");
 const pagePrevBtn = document.getElementById("page-prev") as HTMLButtonElement;
 const pageNextBtn = document.getElementById("page-next") as HTMLButtonElement;
@@ -75,6 +88,63 @@ function getBaseName(fileName: string) {
 
 function getFolderName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function normalizeFolderKey(path: string) {
+  return path.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function isSameFolder(a: string, b: string) {
+  return normalizeFolderKey(a) === normalizeFolderKey(b);
+}
+
+function isPathInsideFolder(path: string, folder: string) {
+  const normalizedPath = normalizeFolderKey(path);
+  const normalizedFolder = normalizeFolderKey(folder);
+  return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}\\`) || normalizedPath.startsWith(`${normalizedFolder}/`);
+}
+
+function getOwningRoot(path: string) {
+  return rootFolders.find((root) => isPathInsideFolder(path, root)) || null;
+}
+
+function saveRootFolders() {
+  localStorage.setItem(ROOT_FOLDERS_KEY, JSON.stringify(rootFolders));
+}
+
+function loadSavedRootFolders() {
+  const savedRoots = localStorage.getItem(ROOT_FOLDERS_KEY);
+  if (savedRoots) {
+    try {
+      const parsed = JSON.parse(savedRoots);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((path): path is string => typeof path === "string" && path.trim().length > 0);
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  const legacyFolder = localStorage.getItem(LEGACY_FOLDER_KEY);
+  if (!legacyFolder) return [];
+
+  localStorage.removeItem(LEGACY_FOLDER_KEY);
+  localStorage.setItem(ROOT_FOLDERS_KEY, JSON.stringify([legacyFolder]));
+  return [legacyFolder];
+}
+
+function dedupeRootFolders(paths: string[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  paths.forEach((path) => {
+    const key = normalizeFolderKey(path);
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push(path);
+  });
+
+  return result;
 }
 
 function focusRenameInput(path: string) {
@@ -141,18 +211,62 @@ function initSidebarResize() {
 async function init() {
   loadUserSid();
 
-  // Load persisted folder
-  const savedFolder = localStorage.getItem("last_folder");
-  if (savedFolder) {
-    rootFolder = savedFolder;
-    currentFolder = savedFolder;
-    updateFolderUI(savedFolder);
+  rootFolders = dedupeRootFolders(loadSavedRootFolders());
+  saveRootFolders();
+
+  if (rootFolders.length > 0) {
+    currentFolder = rootFolders[0];
+    updateFolderUI(currentFolder);
     renderFolderList();
-    loadFolderChildren(savedFolder);
-    loadImages(savedFolder);
+    startFolderWatchers();
+    rootFolders.forEach((root) => loadFolderChildren(root));
+    loadImages(currentFolder);
   } else {
     showSelectFolderState();
+    updateFolderUI(null);
   }
+}
+
+async function startFolderWatcher(path: string) {
+  try {
+    await invoke("watch_folder", { rootPath: path });
+  } catch (error) {
+    showToast("Automatic refresh unavailable.", "error");
+  }
+}
+
+async function stopFolderWatcher(path: string) {
+  try {
+    await invoke("unwatch_folder", { rootPath: path });
+  } catch {
+    // The watcher is best effort. Removed roots are also ignored by the frontend event filter.
+  }
+}
+
+function startFolderWatchers() {
+  rootFolders.forEach((path) => startFolderWatcher(path));
+}
+
+async function initFolderChangeListener() {
+  await listen<FolderChangedPayload>("folder-changed", (event) => {
+    if (rootFolders.length === 0 || !currentFolder) return;
+    if (!rootFolders.some((root) => isSameFolder(root, event.payload.root_path))) return;
+
+    if (folderRefreshTimer) {
+      clearTimeout(folderRefreshTimer);
+    }
+
+    folderRefreshTimer = setTimeout(async () => {
+      if (isRefreshingFromWatcher) return;
+
+      isRefreshingFromWatcher = true;
+      try {
+        await refreshCurrentFolder();
+      } finally {
+        isRefreshingFromWatcher = false;
+      }
+    }, 500);
+  });
 }
 
 async function loadUserSid() {
@@ -172,17 +286,53 @@ function revealAppWindow() {
   });
 }
 
-function updateFolderUI(path: string) {
-  if (currentFolderPathEl) currentFolderPathEl.textContent = path;
-  if (settingsFolderPathEl) settingsFolderPathEl.textContent = path;
-  if (currentFolderNameEl) currentFolderNameEl.textContent = path.split(/[\\/]/).pop() || "Gallery";
+function updateFolderUI(path: string | null) {
+  if (currentFolderPathEl) currentFolderPathEl.textContent = path || "Add a folder to view images";
+  if (currentFolderNameEl) currentFolderNameEl.textContent = path ? getFolderName(path) : "No Folder Selected";
+  renderSettingsSourceList();
+}
+
+function renderSettingsSourceList() {
+  if (!settingsSourceListEl) return;
+
+  settingsSourceListEl.innerHTML = "";
+  if (rootFolders.length === 0) return;
+
+  const fragment = document.createDocumentFragment();
+  rootFolders.forEach((root) => {
+    const row = document.createElement("div");
+    row.className = "settings-source-row";
+
+    const pathText = document.createElement("span");
+    pathText.className = "settings-source-path";
+    pathText.title = root;
+    pathText.textContent = root;
+
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "sidebar-icon-btn settings-source-remove";
+    removeButton.title = "Remove source";
+    removeButton.dataset.path = root;
+    removeButton.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 6 6 18" />
+        <path d="m6 6 12 12" />
+      </svg>
+    `;
+
+    row.appendChild(pathText);
+    row.appendChild(removeButton);
+    fragment.appendChild(row);
+  });
+
+  settingsSourceListEl.appendChild(fragment);
 }
 
 function renderFolderList() {
   if (!folderListEl) return;
 
   folderListEl.innerHTML = "";
-  if (!rootFolder) {
+  if (rootFolders.length === 0) {
     const placeholder = document.createElement("button");
     placeholder.type = "button";
     placeholder.className = "folder-control folder-item";
@@ -193,21 +343,46 @@ function renderFolderList() {
   }
 
   const fragment = document.createDocumentFragment();
-  renderFolderBranch({
-    name: getFolderName(rootFolder),
-    path: rootFolder,
-    has_children: (folderChildren.get(rootFolder)?.length || 0) > 0,
-  }, 0, fragment);
+  let renderedCount = 0;
+
+  rootFolders.forEach((root) => {
+    const didRender = renderFolderBranch({
+      name: getFolderName(root),
+      path: root,
+      has_children: (folderChildren.get(root)?.length || 0) > 0,
+    }, 0, fragment, true);
+
+    if (didRender) renderedCount += 1;
+  });
+
+  if (renderedCount === 0) {
+    const emptyRow = document.createElement("div");
+    emptyRow.className = "folder-tree-empty";
+    emptyRow.textContent = "No matching folders";
+    fragment.appendChild(emptyRow);
+  }
+
   folderListEl.appendChild(fragment);
 }
 
-function renderFolderBranch(folder: FolderData, depth: number, container: DocumentFragment | HTMLElement) {
+function folderMatchesSearch(folder: FolderData): boolean {
+  if (!folderSearchQuery) return true;
+
+  const query = folderSearchQuery.toLowerCase();
+  if (folder.name.toLowerCase().includes(query)) return true;
+
+  return (folderChildren.get(folder.path) || []).some((child) => folderMatchesSearch(child));
+}
+
+function renderFolderBranch(folder: FolderData, depth: number, container: DocumentFragment | HTMLElement, isRoot = false) {
+  if (!folderMatchesSearch(folder)) return false;
+
   const isExpanded = expandedFolderPaths.has(folder.path);
   const isLoading = loadingFolderPaths.has(folder.path);
   const hasError = folderLoadErrors.has(folder.path);
   const canExpand = Boolean(folder.has_children) || isLoading;
   const row = document.createElement("div");
-  row.className = `folder-tree-row ${currentFolder === folder.path ? "active" : ""}`;
+  row.className = `folder-tree-row ${currentFolder === folder.path ? "active" : ""} ${isRoot ? "root-row" : ""}`;
   row.style.setProperty("--folder-depth", String(depth));
 
   const folderButton = document.createElement("button");
@@ -246,7 +421,7 @@ function renderFolderBranch(folder: FolderData, depth: number, container: Docume
   row.appendChild(folderButton);
   container.appendChild(row);
 
-  if (isExpanded) {
+  if (isExpanded || folderSearchQuery) {
     const children = folderChildren.get(folder.path) || [];
     children.forEach((child) => renderFolderBranch(child, depth + 1, container));
 
@@ -258,11 +433,17 @@ function renderFolderBranch(folder: FolderData, depth: number, container: Docume
       container.appendChild(emptyRow);
     }
   }
+
+  return true;
 }
 
-async function loadFolderChildren(path: string) {
-  if (folderChildren.has(path) || loadingFolderPaths.has(path)) return;
+async function loadFolderChildren(path: string, force = false) {
+  if (!force && (folderChildren.has(path) || loadingFolderPaths.has(path))) return;
+  if (loadingFolderPaths.has(path)) return;
 
+  if (force) {
+    folderChildren.delete(path);
+  }
   loadingFolderPaths.add(path);
   folderLoadErrors.delete(path);
   renderFolderList();
@@ -276,6 +457,19 @@ async function loadFolderChildren(path: string) {
   } finally {
     loadingFolderPaths.delete(path);
     renderFolderList();
+  }
+}
+
+async function ensureFolderTreeLoaded(path: string, visited = new Set<string>()) {
+  const key = normalizeFolderKey(path);
+  if (visited.has(key)) return;
+
+  visited.add(key);
+  await loadFolderChildren(path);
+
+  const children = folderChildren.get(path) || [];
+  for (const child of children) {
+    await ensureFolderTreeLoaded(child.path, visited);
   }
 }
 
@@ -338,16 +532,51 @@ async function selectFolder() {
   });
 
   if (selected && typeof selected === 'string') {
-    rootFolder = selected;
+    if (!rootFolders.some((root) => isSameFolder(root, selected))) {
+      rootFolders.push(selected);
+      saveRootFolders();
+    }
+
     currentFolder = selected;
-    resetFolderTree();
-    localStorage.setItem("last_folder", selected);
     updateFolderUI(selected);
+    await startFolderWatcher(selected);
     await loadFolderChildren(selected);
     renderFolderList();
     loadImages(selected);
     toggleSettings(false);
   }
+}
+
+async function removeRootFolder(path: string) {
+  rootFolders = rootFolders.filter((root) => !isSameFolder(root, path));
+  saveRootFolders();
+  await stopFolderWatcher(path);
+
+  for (const key of Array.from(folderChildren.keys())) {
+    if (isPathInsideFolder(key, path)) folderChildren.delete(key);
+  }
+  for (const key of Array.from(expandedFolderPaths)) {
+    if (isPathInsideFolder(key, path)) expandedFolderPaths.delete(key);
+  }
+
+  if (currentFolder && isPathInsideFolder(currentFolder, path)) {
+    currentFolder = rootFolders[0] || null;
+    if (currentFolder) {
+      updateFolderUI(currentFolder);
+      await loadFolderChildren(currentFolder);
+      await loadImages(currentFolder);
+    } else {
+      allImages = [];
+      resetPagination();
+      updateFolderUI(null);
+      renderFolderList();
+      showSelectFolderState();
+    }
+    return;
+  }
+
+  updateFolderUI(currentFolder);
+  renderFolderList();
 }
 
 async function loadImages(path: string) {
@@ -365,18 +594,26 @@ async function loadImages(path: string) {
 }
 
 async function refreshCurrentFolder() {
-  if (!rootFolder || !currentFolder) return;
+  if (rootFolders.length === 0 || !currentFolder) return;
 
   const expandedBeforeRefresh = new Set(expandedFolderPaths);
   resetFolderTree();
   expandedBeforeRefresh.forEach((path) => expandedFolderPaths.add(path));
   renderFolderList();
 
-  await loadFolderChildren(rootFolder);
+  for (const root of rootFolders) {
+    await loadFolderChildren(root, true);
+  }
 
   for (const path of expandedBeforeRefresh) {
-    if (path !== rootFolder) {
-      await loadFolderChildren(path);
+    if (!rootFolders.some((root) => isSameFolder(root, path))) {
+      await loadFolderChildren(path, true);
+    }
+  }
+
+  if (folderSearchQuery) {
+    for (const root of rootFolders) {
+      await ensureFolderTreeLoaded(root);
     }
   }
 
@@ -424,7 +661,7 @@ function updatePaginationControls(totalItems: number, totalPages: number) {
   if (seeAllBtn) {
     seeAllBtn.disabled = !paginationAvailable;
     seeAllBtn.textContent = showAllImages ? "Show pages" : "See all";
-    seeAllBtn.classList.toggle("active", showAllImages);
+    seeAllBtn.classList.toggle("active", paginationAvailable);
   }
 
   if (!imageCountEl) return;
@@ -537,11 +774,12 @@ function renderImages(images: ImageData[]) {
 }
 
 async function renameImage(path: string, newBaseName: string) {
-  if (!rootFolder) return;
+  const owningRoot = getOwningRoot(path);
+  if (!owningRoot) return;
 
   try {
     const renamedImage = await invoke<ImageData>("rename_image", {
-      rootPath: rootFolder,
+      rootPath: owningRoot,
       imagePath: path,
       newBaseName,
     });
@@ -559,7 +797,8 @@ async function renameImage(path: string, newBaseName: string) {
 }
 
 async function deleteImage(path: string) {
-  if (!rootFolder) return;
+  const owningRoot = getOwningRoot(path);
+  if (!owningRoot) return;
 
   if (!window.confirm("Move this image to Recycle Bin?")) {
     return;
@@ -567,7 +806,7 @@ async function deleteImage(path: string) {
 
   try {
     await invoke("delete_image", {
-      rootPath: rootFolder,
+      rootPath: owningRoot,
       imagePath: path,
     });
 
@@ -645,9 +884,35 @@ function toggleSettings(show: boolean) {
   }
 }
 
+function toggleFolderSearch(show: boolean) {
+  folderSearchPanel?.classList.toggle("active", show);
+
+  if (show) {
+    folderSearchInput?.focus();
+    folderSearchInput?.select();
+  } else if (folderSearchInput) {
+    folderSearchInput.value = "";
+    folderSearchQuery = "";
+    renderFolderList();
+  }
+}
+
+async function updateFolderSearch(query: string) {
+  folderSearchQuery = query.trim();
+
+  if (folderSearchQuery) {
+    for (const root of rootFolders) {
+      await ensureFolderTreeLoaded(root);
+    }
+  }
+
+  renderFolderList();
+}
+
 // Event Listeners
 window.addEventListener("DOMContentLoaded", () => {
   initSidebarResize();
+  initFolderChangeListener();
   revealAppWindow();
   init();
 
@@ -657,6 +922,11 @@ window.addEventListener("DOMContentLoaded", () => {
 
   document.addEventListener("keydown", (e) => {
     const key = e.key.toLowerCase();
+    if (key === "escape" && settingsOverlay?.classList.contains("active")) {
+      toggleSettings(false);
+      return;
+    }
+
     if (key === "f5" || ((e.ctrlKey || e.metaKey) && key === "r")) {
       e.preventDefault();
       e.stopPropagation();
@@ -672,9 +942,24 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById('btn-settings')?.addEventListener('click', () => toggleSettings(true));
   document.getElementById('close-settings')?.addEventListener('click', () => toggleSettings(false));
   document.getElementById('select-folder-settings')?.addEventListener('click', selectFolder);
+  document.getElementById('add-folder-sidebar')?.addEventListener('click', selectFolder);
+  document.getElementById('folder-search-toggle')?.addEventListener('click', () => {
+    toggleFolderSearch(!folderSearchPanel?.classList.contains("active"));
+  });
+  document.getElementById('folder-search-clear')?.addEventListener('click', () => toggleFolderSearch(false));
 
   settingsOverlay?.addEventListener('click', (e) => {
     if (e.target === settingsOverlay) toggleSettings(false);
+  });
+
+  settingsSourceListEl?.addEventListener("click", (e) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+
+    const removeButton = target.closest(".settings-source-remove");
+    if (removeButton instanceof HTMLElement && removeButton.dataset.path) {
+      removeRootFolder(removeButton.dataset.path);
+    }
   });
 
   searchInput?.addEventListener("input", () => {
@@ -683,6 +968,20 @@ window.addEventListener("DOMContentLoaded", () => {
       resetPagination();
       renderCurrentImages();
     }, 200);
+  });
+
+  folderSearchInput?.addEventListener("input", () => {
+    if (folderSearchDebounceTimer) clearTimeout(folderSearchDebounceTimer);
+    folderSearchDebounceTimer = setTimeout(() => {
+      updateFolderSearch(folderSearchInput.value);
+    }, 200);
+  });
+
+  folderSearchInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      toggleFolderSearch(false);
+    }
   });
 
   imageGrid?.addEventListener("click", (e) => {

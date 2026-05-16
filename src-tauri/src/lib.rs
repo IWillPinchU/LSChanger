@@ -4,12 +4,15 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use image::codecs::jpeg::JpegEncoder;
 use image::io::Reader as ImageReader;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -31,6 +34,15 @@ pub struct FolderData {
     name: String,
     path: String,
     has_children: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct FolderChangedPayload {
+    root_path: String,
+}
+
+struct FolderWatcherState {
+    watchers: Mutex<HashMap<String, RecommendedWatcher>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -416,6 +428,51 @@ fn list_subfolders(root_path: String) -> Result<Vec<FolderData>, String> {
 }
 
 #[tauri::command]
+fn watch_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, FolderWatcherState>,
+    root_path: String,
+) -> Result<(), String> {
+    let root = canonical_root(&root_path)?;
+    let payload_root = normalize_path_string(&root);
+    let event_root = payload_root.clone();
+    let app_handle = app.clone();
+
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if result.is_ok() {
+            let _ = app_handle.emit(
+                "folder-changed",
+                FolderChangedPayload {
+                    root_path: event_root.clone(),
+                },
+            );
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    watcher
+        .watch(&root, RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+
+    let mut active_watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+    active_watchers.insert(payload_root, watcher);
+
+    Ok(())
+}
+
+#[tauri::command]
+fn unwatch_folder(
+    state: tauri::State<'_, FolderWatcherState>,
+    root_path: String,
+) -> Result<(), String> {
+    let root = canonical_root(&root_path)?;
+    let payload_root = normalize_path_string(&root);
+    let mut active_watchers = state.watchers.lock().map_err(|e| e.to_string())?;
+    active_watchers.remove(&payload_root);
+    Ok(())
+}
+
+#[tauri::command]
 fn rename_image(root_path: String, image_path: String, new_base_name: String) -> Result<ImageData, String> {
     let image = canonical_file_under_root(&root_path, &image_path)?;
     let trimmed_name = new_base_name.trim();
@@ -538,13 +595,17 @@ fn save_setting(key: String, value: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        .manage(FolderWatcherState {
+            watchers: Mutex::new(HashMap::new()),
+        })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_user_sid,
             grant_permissions,
             list_images,
             list_subfolders,
+            watch_folder,
+            unwatch_folder,
             rename_image,
             delete_image,
             apply_lock_screen,
