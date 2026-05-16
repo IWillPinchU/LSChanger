@@ -28,6 +28,6 @@ rayon = "1.8"
 trash = "5.2.5"
 
 [profile.release]
-lto = "thin"
+lto = true
 codegen-units = 1
 strip = true
