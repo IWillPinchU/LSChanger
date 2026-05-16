@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-apply-lock-screen"
+description = "Enables the apply_lock_screen command without any pre-configured scope."
+commands.allow = ["apply_lock_screen"]
+
+[[permission]]
+identifier = "deny-apply-lock-screen"
+description = "Denies the apply_lock_screen command without any pre-configured scope."
+commands.deny = ["apply_lock_screen"]
