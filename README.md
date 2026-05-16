@@ -1,152 +1,121 @@
 # LSChanger
 
-Windows Tauri 2 app to browse local wallpaper folders and apply image as Windows lock screen. Stack: Tauri 2, TypeScript, Vite, Rust.
+LSChanger is a Windows desktop app for browsing local wallpaper folders and applying an image as the Windows lock screen background.
 
-## Current State
+It is built with Tauri 2, Rust, TypeScript, and Vite.
 
-- One selected root folder plus direct child folders only. No recursive scan.
-- Root sidebar label is **Default**. Do not rename back to `Root`.
-- Supported discovery extensions: `.jpg`, `.jpeg`, `.png`, `.webp`.
-- Decode uses content sniffing, so PNG bytes named `.jpg` can still work.
-- Right-click WebView/browser context menu disabled globally.
-- User prefers no automated tests unless explicitly requested.
-- User prefers to run full Tauri build manually. Do not run `npm run tauri build` unless asked.
+## What It Does
 
-## Features
+- Browse images from a selected local folder.
+- View the default folder and its direct subfolders from the sidebar.
+- Filter images by orientation: all, landscape, or portrait.
+- Sort images by name, date, size, or resolution.
+- Preview images in a paginated gallery.
+- Apply an image as the Windows lock screen background.
+- Rename image files while preserving their extensions.
+- Delete images by moving them to the Windows Recycle Bin.
+- Cache image metadata and thumbnails for faster browsing.
 
-- Select image folder in Settings.
-- Browse Default folder and direct subfolders.
-- Filter: `All`, `Landscape`, `Portrait`.
-- Sort: alphabetical, date, size, resolution.
-- Pagination: 24/page, previous/next, **See all**.
-- Refresh current folder via header refresh icon.
-- Hover card thumbnail, click **Apply**.
-- Rename image, preserving extension.
-- Delete image to Windows Recycle Bin.
+Supported image formats:
 
-## Runtime Data
+- JPG / JPEG
+- PNG
+- WebP
 
-Data lives beside running executable:
+## Windows Lock Screen Behavior
 
-```text
-LSChanger_Data\
-  EBWebView\
-  cache\
-    image-metadata.json
-    thumbnails\
-```
-
-- `EBWebView` is WebView runtime data. Never store LSChanger cache there.
-- LSChanger cache belongs in `LSChanger_Data\cache`.
-- `image-metadata.json` stores path, size, modified time, dimensions, orientation, thumbnail path.
-- `thumbnails\` stores generated preview JPGs.
-- Cache key uses normalized path + modified timestamp + file size.
-- Cache is disposable. Refresh/load folder rebuilds missing cache.
-- Cached `width == 0` or `height == 0` is invalid and rebuilt.
-- Missing thumbnails regenerate.
-- Broken thumbnail load falls back to original image once.
-
-Example paths:
-
-```text
-D:\LSChanger\lschanger.exe
-D:\LSChanger\LSChanger_Data
-```
-
-```text
-D:\changeLockScreen\src-tauri\target\release\lschanger.exe
-D:\changeLockScreen\src-tauri\target\release\LSChanger_Data
-```
-
-## Lock Screen Apply
-
-Apply flow:
-
-- Grants Windows permissions on lock-screen locations when needed.
-- Decodes selected image using content sniffing.
-- Writes real JPEG to:
+LSChanger currently applies the selected image by writing a JPEG version to:
 
 ```text
 C:\Windows\Web\Screen\img100.jpg
 ```
 
-- Clears Windows readonly lock-screen cache folders when present.
-- If source decode fails, apply fails instead of writing bad bytes.
-- Admin may be needed if Windows blocks permission changes.
+The app is intended to run with administrator privileges because Windows protects this location.
 
-## Commands
+This approach is useful in environments where the normal Windows lock screen personalization path is restricted by organization policy. Behavior may still vary across machines because Windows also keeps per-user lock screen cache files under `C:\ProgramData\Microsoft\Windows\SystemData`.
+
+## Requirements
+
+- Windows 10 or Windows 11
+- Node.js
+- Rust
+- Tauri 2 prerequisites for Windows
+- Administrator access for applying lock screen changes
+
+## Development
+
+Install dependencies:
 
 ```bash
 npm install
-npm run build
-cd src-tauri
-cargo check
 ```
 
-Run dev:
+Run the app in development mode:
 
 ```bash
 npm run tauri dev
 ```
 
-Build exe only when user asks:
+Build the frontend:
+
+```bash
+npm run build
+```
+
+Check the Rust backend:
+
+```bash
+cd src-tauri
+cargo check
+```
+
+Build the desktop executable:
 
 ```bash
 npm run tauri build
 ```
 
-Exe output:
+Installer bundling is currently disabled in `src-tauri/tauri.conf.json`, so the release build focuses on the executable output.
+
+## Project Structure
 
 ```text
-src-tauri\target\release\lschanger.exe
+.
+├── index.html
+├── package.json
+├── src/
+│   ├── main.ts
+│   └── styles.css
+└── src-tauri/
+    ├── src/
+    │   ├── lib.rs
+    │   └── main.rs
+    ├── Cargo.toml
+    ├── build.rs
+    └── tauri.conf.json
 ```
 
-Installer bundling disabled in `src-tauri\tauri.conf.json`.
+Runtime data is stored beside the running executable in:
 
-## Build Profile
+```text
+LSChanger_Data/
+```
 
-Current fast iteration profile in `src-tauri\Cargo.toml`:
+This includes thumbnail and metadata cache files. The cache is disposable and can be regenerated by loading or refreshing folders in the app.
+
+## Release Profile
+
+The Rust release profile is configured for a smaller optimized executable:
 
 ```toml
 [profile.release]
 lto = "thin"
-codegen-units = 16
-strip = true
-```
-
-Final optimized exe profile:
-
-```toml
-[profile.release]
-lto = true
 codegen-units = 1
 strip = true
 ```
 
-Switch back only before final release build.
+## Notes
 
-## Manual Checks
-
-- Open image folder.
-- Confirm root label **Default**.
-- Refresh folder.
-- Switch subfolders.
-- Search/filter/sort.
-- Page prev/next and **See all**.
-- Rename image.
-- Delete image.
-- Delete `LSChanger_Data\cache\thumbnails`, refresh, thumbnails recover or fallback.
-- Delete `LSChanger_Data\cache\image-metadata.json`, refresh, metadata rebuilds.
-- Apply normal JPG.
-- Apply PNG-content file with `.jpg` extension.
-- Right-click should not open WebView context menu.
-
-## Recent Context
-
-- Thumbnail + metadata cache implemented.
-- Zero-dimension metadata invalidated.
-- Missing thumbnails regenerate.
-- Broken thumbnails fallback to original once.
-- Apply re-encodes selected image as JPEG.
-- Refresh icon added left of page arrows.
-- Apply button styled like selected sidebar button.
+- The app is Windows-specific.
+- Generated folders such as `node_modules`, `dist`, Tauri build output, local preview files, and tool state are intentionally ignored by Git.
+- Lock screen changes can be affected by Windows policy, permissions, and per-user cache state.
