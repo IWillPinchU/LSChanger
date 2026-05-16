@@ -364,6 +364,25 @@ async function loadImages(path: string) {
   }
 }
 
+async function refreshCurrentFolder() {
+  if (!rootFolder || !currentFolder) return;
+
+  const expandedBeforeRefresh = new Set(expandedFolderPaths);
+  resetFolderTree();
+  expandedBeforeRefresh.forEach((path) => expandedFolderPaths.add(path));
+  renderFolderList();
+
+  await loadFolderChildren(rootFolder);
+
+  for (const path of expandedBeforeRefresh) {
+    if (path !== rootFolder) {
+      await loadFolderChildren(path);
+    }
+  }
+
+  await loadImages(currentFolder);
+}
+
 function resetPagination() {
   currentPage = 1;
   showAllImages = false;
@@ -740,7 +759,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   document.getElementById('refresh-btn')?.addEventListener('click', () => {
-    if (currentFolder) loadImages(currentFolder);
+    refreshCurrentFolder();
   });
 
   pagePrevBtn?.addEventListener("click", () => {
