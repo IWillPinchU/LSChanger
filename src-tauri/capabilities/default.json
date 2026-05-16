@@ -15,6 +15,7 @@
       "allow-get-user-sid",
       "allow-grant-permissions",
       "allow-list-images",
+      "allow-import-images",
       "allow-list-subfolders",
       "allow-watch-folder",
       "allow-unwatch-folder",

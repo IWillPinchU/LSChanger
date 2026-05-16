@@ -41,6 +41,14 @@ struct FolderChangedPayload {
     root_path: String,
 }
 
+#[derive(Serialize)]
+struct ImportSummary {
+    imported: usize,
+    skipped: usize,
+    overwritten: usize,
+    renamed: usize,
+}
+
 struct FolderWatcherState {
     watchers: Mutex<HashMap<String, RecommendedWatcher>>,
 }
@@ -310,6 +318,38 @@ fn normalize_path_string(path: &Path) -> String {
     }
 }
 
+fn unique_import_target(target: PathBuf) -> PathBuf {
+    if !target.exists() {
+        return target;
+    }
+
+    let parent = target
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(PathBuf::new);
+    let stem = target
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+    let extension = target
+        .extension()
+        .map(|value| value.to_string_lossy().to_string());
+
+    for index in 1.. {
+        let file_name = match &extension {
+            Some(extension) => format!("{} ({}).{}", stem, index, extension),
+            None => format!("{} ({})", stem, index),
+        };
+        let candidate = parent.join(file_name);
+
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    target
+}
+
 fn folder_has_children(path: &Path) -> bool {
     fs::read_dir(path)
         .map(|entries| {
@@ -403,6 +443,92 @@ fn list_images(dir_path: String) -> Result<Vec<ImageData>, String> {
     cleanup_thumbnail_dir(&valid_thumbnail_paths);
 
     Ok(images)
+}
+
+#[tauri::command]
+fn import_images(
+    target_folder: String,
+    source_paths: Vec<String>,
+    duplicate_mode: String,
+) -> Result<ImportSummary, String> {
+    if duplicate_mode != "overwrite" && duplicate_mode != "rename" {
+        return Err("Invalid duplicate handling mode.".to_string());
+    }
+
+    let target_root = fs::canonicalize(target_folder).map_err(|e| e.to_string())?;
+    if !target_root.is_dir() {
+        return Err("Import target is not a folder.".to_string());
+    }
+
+    let mut summary = ImportSummary {
+        imported: 0,
+        skipped: 0,
+        overwritten: 0,
+        renamed: 0,
+    };
+
+    for source_path in source_paths {
+        let Ok(source) = fs::canonicalize(source_path) else {
+            summary.skipped += 1;
+            continue;
+        };
+
+        if !source.is_file() || !is_supported_image(&source) {
+            summary.skipped += 1;
+            continue;
+        }
+
+        let Some(file_name) = source.file_name() else {
+            summary.skipped += 1;
+            continue;
+        };
+
+        let initial_target = target_root.join(file_name);
+        let mut did_rename = false;
+        let mut did_overwrite = false;
+
+        let target = if initial_target.exists() && duplicate_mode == "rename" {
+            let renamed_target = unique_import_target(initial_target);
+            if renamed_target.exists() {
+                summary.skipped += 1;
+                continue;
+            }
+            did_rename = true;
+            renamed_target
+        } else {
+            if initial_target.exists() {
+                let same_file = fs::canonicalize(&initial_target)
+                    .map(|target| target == source)
+                    .unwrap_or(false);
+
+                if same_file {
+                    summary.skipped += 1;
+                    continue;
+                }
+
+                if duplicate_mode == "overwrite" {
+                    did_overwrite = true;
+                }
+            }
+
+            initial_target
+        };
+
+        match fs::copy(&source, &target) {
+            Ok(_) => {
+                summary.imported += 1;
+                if did_rename {
+                    summary.renamed += 1;
+                }
+                if did_overwrite {
+                    summary.overwritten += 1;
+                }
+            }
+            Err(_) => summary.skipped += 1,
+        }
+    }
+
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -603,6 +729,7 @@ pub fn run() {
             get_user_sid,
             grant_permissions,
             list_images,
+            import_images,
             list_subfolders,
             watch_folder,
             unwatch_folder,

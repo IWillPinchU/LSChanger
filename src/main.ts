@@ -54,9 +54,19 @@ interface FolderChangedPayload {
   root_path: string;
 }
 
+interface ImportSummary {
+  imported: number;
+  skipped: number;
+  overwritten: number;
+  renamed: number;
+}
+
+type DuplicateMode = "overwrite" | "rename";
+
 const imageGrid = document.getElementById("image-grid");
 const currentFolderPathEl = document.getElementById("current-folder-path");
 const currentFolderNameEl = document.getElementById("current-folder-name");
+const importImagesBtn = document.getElementById("import-images-btn") as HTMLButtonElement;
 const settingsSourceListEl = document.getElementById("settings-source-list");
 const imageCountEl = document.getElementById("image-count");
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
@@ -86,8 +96,16 @@ function getBaseName(fileName: string) {
   return fileName.replace(/\.[^/.]+$/, "");
 }
 
+function getFileName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
 function getFolderName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function isSupportedImagePath(path: string) {
+  return /\.(jpe?g|png|webp)$/i.test(path);
 }
 
 function normalizeFolderKey(path: string) {
@@ -289,6 +307,7 @@ function revealAppWindow() {
 function updateFolderUI(path: string | null) {
   if (currentFolderPathEl) currentFolderPathEl.textContent = path || "Add a folder to view images";
   if (currentFolderNameEl) currentFolderNameEl.textContent = path ? getFolderName(path) : "No Folder Selected";
+  if (importImagesBtn) importImagesBtn.hidden = !path;
   renderSettingsSourceList();
 }
 
@@ -315,8 +334,7 @@ function renderSettingsSourceList() {
     removeButton.dataset.path = root;
     removeButton.innerHTML = `
       <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M18 6 6 18" />
-        <path d="m6 6 12 12" />
+        <path d="M5 12h14" />
       </svg>
     `;
 
@@ -390,6 +408,7 @@ function renderFolderBranch(folder: FolderData, depth: number, container: Docume
   folderButton.className = "folder-control folder-item";
   folderButton.title = folder.path;
   folderButton.dataset.path = folder.path;
+  folderButton.dataset.canExpand = String(canExpand);
 
   const folderToggle = document.createElement("span");
   folderToggle.className = `folder-toggle ${isExpanded ? "expanded" : ""} ${canExpand ? "" : "empty"}`;
@@ -874,6 +893,178 @@ function showToast(message: string, type: "success" | "error" | "info" = "info")
   }, 4000);
 }
 
+interface DuplicateDecision {
+  mode: DuplicateMode | null;
+  applyToAll: boolean;
+}
+
+function askDuplicateImportMode(fileName: string, remainingCount: number): Promise<DuplicateDecision> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay duplicate-import-overlay active";
+    overlay.innerHTML = `
+      <div class="duplicate-import-dialog" role="dialog" aria-modal="true" aria-labelledby="duplicate-import-title">
+        <div class="duplicate-import-copy">
+          <h2 id="duplicate-import-title">Files already exist</h2>
+          <p><strong>${escapeHtml(fileName)}</strong> already exists in this folder.</p>
+          ${remainingCount > 1 ? `<p>${remainingCount} duplicate items remain in this import.</p>` : ""}
+        </div>
+        <label class="duplicate-import-option">
+          <input class="duplicate-apply-all" type="checkbox" />
+          <span>Do this for all current items</span>
+        </label>
+        <div class="duplicate-import-actions">
+          <button class="btn-outline-small duplicate-overwrite" type="button">Overwrite</button>
+          <button class="btn-outline-small duplicate-rename" type="button">Rename</button>
+          <button class="btn-outline-small duplicate-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    `;
+
+    const keyHandler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        finish(null);
+      }
+    };
+
+    const finish = (mode: DuplicateMode | null) => {
+      const applyToAll = Boolean(overlay.querySelector<HTMLInputElement>(".duplicate-apply-all")?.checked);
+      document.removeEventListener("keydown", keyHandler);
+      overlay.remove();
+      resolve({ mode, applyToAll });
+    };
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) finish(null);
+    });
+
+    overlay.querySelector(".duplicate-overwrite")?.addEventListener("click", () => finish("overwrite"));
+    overlay.querySelector(".duplicate-rename")?.addEventListener("click", () => finish("rename"));
+    overlay.querySelector(".duplicate-cancel")?.addEventListener("click", () => finish(null));
+
+    document.addEventListener("keydown", keyHandler);
+    document.body.appendChild(overlay);
+    overlay.querySelector<HTMLButtonElement>(".duplicate-rename")?.focus();
+  });
+}
+
+function splitImportPathsByDuplicateDecision(paths: string[]) {
+  const existingNames = new Set(allImages.map((image) => image.name.toLowerCase()));
+  const seenNames = new Set<string>();
+  const directPaths: string[] = [];
+  const duplicatePaths: string[] = [];
+
+  paths.forEach((path) => {
+    const name = getFileName(path).toLowerCase();
+    if (existingNames.has(name) || seenNames.has(name)) {
+      duplicatePaths.push(path);
+    } else {
+      directPaths.push(path);
+    }
+    seenNames.add(name);
+  });
+
+  return { directPaths, duplicatePaths };
+}
+
+function mergeImportSummaries(summaries: ImportSummary[]): ImportSummary {
+  return summaries.reduce<ImportSummary>((merged, summary) => ({
+    imported: merged.imported + summary.imported,
+    skipped: merged.skipped + summary.skipped,
+    overwritten: merged.overwritten + summary.overwritten,
+    renamed: merged.renamed + summary.renamed,
+  }), { imported: 0, skipped: 0, overwritten: 0, renamed: 0 });
+}
+
+function showImportSummary(summary: ImportSummary) {
+  const details = [];
+
+  if (summary.overwritten > 0) details.push(`${summary.overwritten} overwritten`);
+  if (summary.renamed > 0) details.push(`${summary.renamed} renamed`);
+  if (summary.skipped > 0) details.push(`${summary.skipped} skipped`);
+
+  const suffix = details.length > 0 ? ` ${details.join(", ")}.` : "";
+  showToast(`Imported ${summary.imported} image${summary.imported === 1 ? "" : "s"}.${suffix}`, summary.imported > 0 ? "success" : "info");
+}
+
+async function collectDuplicateImportDecisions(duplicatePaths: string[]) {
+  const overwritePaths: string[] = [];
+  const renamePaths: string[] = [];
+  let applyAllMode: DuplicateMode | null = null;
+
+  for (let index = 0; index < duplicatePaths.length; index += 1) {
+    const path = duplicatePaths[index];
+    let mode: DuplicateMode | null = applyAllMode;
+
+    if (!mode) {
+      const decision = await askDuplicateImportMode(getFileName(path), duplicatePaths.length - index);
+      if (!decision.mode) return null;
+      mode = decision.mode;
+      if (decision.applyToAll) applyAllMode = mode;
+    }
+
+    if (mode === "overwrite") {
+      overwritePaths.push(path);
+    } else {
+      renamePaths.push(path);
+    }
+  }
+
+  return { overwritePaths, renamePaths };
+}
+
+async function runImportBatch(paths: string[], duplicateMode: DuplicateMode) {
+  if (!currentFolder || paths.length === 0) return null;
+
+  return invoke<ImportSummary>("import_images", {
+    targetFolder: currentFolder,
+    sourcePaths: paths,
+    duplicateMode,
+  });
+}
+
+async function importImageFiles(paths: string[]) {
+  if (!currentFolder) {
+    showToast("Select a folder before importing images.", "error");
+    return;
+  }
+
+  const supportedPaths = paths.filter(isSupportedImagePath);
+  if (supportedPaths.length === 0) {
+    showToast("No supported images to import.", "error");
+    return;
+  }
+
+  const { directPaths, duplicatePaths } = splitImportPathsByDuplicateDecision(supportedPaths);
+  const duplicateDecisions = duplicatePaths.length > 0
+    ? await collectDuplicateImportDecisions(duplicatePaths)
+    : { overwritePaths: [], renamePaths: [] };
+
+  if (!duplicateDecisions) return;
+
+  try {
+    const summaries = [
+      await runImportBatch([...directPaths, ...duplicateDecisions.renamePaths], "rename"),
+      await runImportBatch(duplicateDecisions.overwritePaths, "overwrite"),
+    ];
+    showImportSummary(mergeImportSummaries(summaries.filter((summary): summary is ImportSummary => Boolean(summary))));
+    await refreshCurrentFolder();
+  } catch (error) {
+    showToast("Import failed: " + error, "error");
+  }
+}
+
+async function importImagesFromPicker() {
+  const selected = await open({
+    multiple: true,
+    directory: false,
+    filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "webp"] }],
+  });
+
+  if (!selected) return;
+  await importImageFiles(Array.isArray(selected) ? selected : [selected]);
+}
+
 function toggleSettings(show: boolean) {
   if (settingsOverlay) {
     if (show) {
@@ -1057,8 +1248,28 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  folderListEl?.addEventListener("dblclick", (e) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(".folder-toggle")) return;
+
+    const folderButton = target.closest(".folder-item");
+    if (
+      folderButton instanceof HTMLElement &&
+      folderButton.dataset.path &&
+      folderButton.dataset.canExpand === "true"
+    ) {
+      e.preventDefault();
+      toggleFolder(folderButton.dataset.path);
+    }
+  });
+
   document.getElementById('refresh-btn')?.addEventListener('click', () => {
     refreshCurrentFolder();
+  });
+
+  importImagesBtn?.addEventListener("click", () => {
+    importImagesFromPicker();
   });
 
   pagePrevBtn?.addEventListener("click", () => {
