@@ -4,10 +4,15 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use image::codecs::jpeg::JpegEncoder;
 use image::io::Reader as ImageReader;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Serialize)]
 pub struct ImageData {
@@ -37,6 +42,15 @@ struct CachedImageData {
     height: u32,
     orientation: String,
     thumbnail_path: Option<String>,
+}
+
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
 }
 
 type MetadataCache = HashMap<String, CachedImageData>;
@@ -296,7 +310,7 @@ fn folder_has_children(path: &Path) -> bool {
 
 #[tauri::command]
 fn get_user_sid() -> Result<String, String> {
-    let output = Command::new("whoami")
+    let output = hidden_command("whoami")
         .arg("/user")
         .arg("/fo")
         .arg("csv")
@@ -315,7 +329,7 @@ fn get_user_sid() -> Result<String, String> {
 
 #[tauri::command]
 fn grant_permissions(path: String) -> Result<(), String> {
-    let status = Command::new("takeown")
+    let status = hidden_command("takeown")
         .arg("/f")
         .arg(&path)
         .arg("/r")
@@ -328,7 +342,7 @@ fn grant_permissions(path: String) -> Result<(), String> {
         return Err(format!("takeown failed for {}", path));
     }
 
-    let status = Command::new("icacls")
+    let status = hidden_command("icacls")
         .arg(&path)
         .arg("/grant")
         .arg("*S-1-5-32-544:F")
